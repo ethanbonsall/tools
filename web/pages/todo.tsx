@@ -1,5 +1,4 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-"use client";
 
 import React, { useEffect, useMemo, useState } from "react";
 import {
@@ -19,60 +18,43 @@ import {
   useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import NavBar from "@/components/navabar_2";
 import Head from "next/head";
-import PageColorPicker from "@/components/PageColorPicker";
+import { Minus } from "lucide-react";
+import AppNav from "@/components/tools/AppNav";
+import { useAppearance } from "@/context/themecontext";
 import { supabase } from "@/lib/supabaseClient";
-
-/**
- * Week Todo Calendar (Google Calendar-ish week view)
- * - 7-day week starting Sunday
- * - Week arrows to navigate
- * - Drag todos up/down within a day to reorder priority
- * - Drag todos between days to change task_date (and reprioritize both days)
- * - Backed by Supabase table public.todos (schema from prompt)
- *
- * Dependencies:
- *   npm i @supabase/supabase-js @dnd-kit/core @dnd-kit/sortable @dnd-kit/utilities
- *
- * Env:
- *   NEXT_PUBLIC_SUPABASE_URL=...
- *   NEXT_PUBLIC_SUPABASE_ANON_KEY=...
- */
+import { useRequireAuth } from "@/lib/auth";
 
 type TodoRow = {
   id: number;
   created_at: string;
-  task_date: string; // YYYY-MM-DD
-  priority: number; // smallint
-  due_date: string | null; // YYYY-MM-DD
+  task_date: string | null;
+  priority: number;
+  due_date: string | null;
   title: string;
   content: string | null;
-  user_id: string; // UUID
+  user_id: string;
   completed: boolean;
 };
+
+const BACKLOG_ID = "day:backlog";
 
 function pad2(n: number) {
   return String(n).padStart(2, "0");
 }
 
 function toISODate(d: Date) {
-  // local date -> YYYY-MM-DD
-  const yyyy = d.getFullYear();
-  const mm = pad2(d.getMonth() + 1);
-  const dd = pad2(d.getDate());
-  return `${yyyy}-${mm}-${dd}`;
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
 
 function fromISODate(s: string) {
-  // YYYY-MM-DD -> Date (local)
   const [y, m, d] = s.split("-").map(Number);
   return new Date(y, m - 1, d);
 }
 
 function startOfWeekSunday(d: Date) {
   const dt = new Date(d);
-  const day = dt.getDay(); // 0 = Sun
+  const day = dt.getDay();
   dt.setDate(dt.getDate() - day);
   dt.setHours(0, 0, 0, 0);
   return dt;
@@ -100,44 +82,16 @@ function prettyMD(d: Date) {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function isSameISO(a: string, b: string) {
-  return a === b;
-}
-
 function sortByPriority(items: TodoRow[]) {
   return [...items].sort((a, b) => a.priority - b.priority);
 }
 
-/** Generates consecutive priorities 1..n */
 function withReprioritized(items: TodoRow[]) {
   return items.map((t, i) => ({ ...t, priority: i + 1 }));
 }
 
 function dayIdFromISO(iso: string) {
   return `day:${iso}`;
-}
-
-/** Wraps day body so the column is a droppable when empty */
-function DroppableDayBody({
-  id,
-  children,
-  className,
-}: {
-  id: string;
-  children: React.ReactNode;
-  className?: string;
-}) {
-  const { setNodeRef, isOver } = useDroppable({ id });
-  return (
-    <div
-      ref={setNodeRef}
-      className={[className, isOver ? "bg-primary/10" : ""]
-        .filter(Boolean)
-        .join(" ")}
-    >
-      {children}
-    </div>
-  );
 }
 
 function isDayId(id: string) {
@@ -148,10 +102,34 @@ function isoFromDayId(dayId: string) {
   return dayId.replace("day:", "");
 }
 
+function DroppableDayBody({
+  id,
+  children,
+  className,
+  onClick,
+}: {
+  id: string;
+  children: React.ReactNode;
+  className?: string;
+  onClick?: () => void;
+}) {
+  const { setNodeRef, isOver } = useDroppable({ id });
+  return (
+    <div
+      ref={setNodeRef}
+      onClick={onClick}
+      className={[className, isOver ? "bg-mint/10" : ""].filter(Boolean).join(" ")}
+    >
+      {children}
+    </div>
+  );
+}
+
 type DraftTodo = {
   title: string;
   content: string;
-  due_date: string; // "" or YYYY-MM-DD
+  due_date: string;
+  undated: boolean;
 };
 
 function SortableTodoCard({
@@ -159,11 +137,13 @@ function SortableTodoCard({
   onEdit,
   onDelete,
   onComplete,
+  onClearDate,
 }: {
   todo: TodoRow;
   onEdit: (t: TodoRow) => void;
   onDelete: (t: TodoRow) => void;
   onComplete: (t: TodoRow) => void;
+  onClearDate?: (t: TodoRow) => void;
 }) {
   const {
     attributes,
@@ -173,6 +153,7 @@ function SortableTodoCard({
     transition,
     isDragging,
   } = useSortable({ id: `todo:${todo.id}` });
+  const [deleteHover, setDeleteHover] = useState(false);
 
   const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
@@ -184,28 +165,55 @@ function SortableTodoCard({
       ref={setNodeRef}
       style={style}
       className={[
-        "group relative rounded-xl border border-primary/20 bg-secondary/70 p-3 shadow-sm",
-        "hover:border-primary/40 hover:bg-secondary/90 hover:shadow transition cursor-grab active:cursor-grabbing",
-        isDragging ? "opacity/50" : "",
+        "relative z-10 rounded-xl border p-3 shadow-sm transition",
+        "cursor-grab active:cursor-grabbing",
+        deleteHover
+          ? "border-red-400 bg-red-50 shadow-none"
+          : "border-line bg-surface hover:border-mint/40 hover:shadow",
+        isDragging ? "opacity-50" : "",
       ].join(" ")}
+      onClick={(e) => {
+        e.stopPropagation();
+        onEdit(todo);
+      }}
       {...attributes}
       {...listeners}
     >
-      <div className="flex flex-col items-start gap-2">
-        <div className="flex flex-row shrink-0 gap-1 justify-between w-full">
+      <div className="relative z-20 flex w-full flex-row justify-between gap-1">
+        <button
+          className={[
+            "flex h-6 w-6 items-center justify-center rounded-md text-base leading-none transition",
+            deleteHover
+              ? "bg-red-100 text-red-600"
+              : "text-muted hover:bg-red-100 hover:text-red-600",
+          ].join(" ")}
+          onMouseEnter={() => setDeleteHover(true)}
+          onMouseLeave={() => setDeleteHover(false)}
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(todo);
+          }}
+          type="button"
+          aria-label="Delete"
+        >
+          ×
+        </button>
+        <div className="flex items-center gap-0.5">
+          {onClearDate && todo.task_date ? (
+            <button
+              className="flex h-6 w-6 items-center justify-center rounded-md text-muted transition hover:bg-line hover:text-ink"
+              onClick={(e) => {
+                e.stopPropagation();
+                onClearDate(todo);
+              }}
+              type="button"
+              aria-label="Remove date"
+            >
+              <Minus className="h-3.5 w-3.5" strokeWidth={2.5} />
+            </button>
+          ) : null}
           <button
-            className="flex h-3 w-3 items-center justify-center text-sm text-text/60 hover:text-red-400 transition"
-            onClick={(e) => {
-              e.stopPropagation();
-              onDelete(todo);
-            }}
-            type="button"
-            aria-label="Delete"
-          >
-            ×
-          </button>
-          <button
-            className="flex h-3 w-3 items-center justify-center text-sm text-text/60 hover:text-green-400 transition"
+            className="flex h-6 w-6 items-center justify-center rounded-md text-sm leading-none text-muted transition hover:bg-mint-soft hover:text-mint"
             onClick={(e) => {
               e.stopPropagation();
               onComplete(todo);
@@ -216,43 +224,34 @@ function SortableTodoCard({
             ✓
           </button>
         </div>
+      </div>
 
-        <button
-          className="min-w-0 flex-1 text-left font-normal"
-          onClick={(e) => {
-            e.stopPropagation();
-            onEdit(todo);
-          }}
-          type="button"
+      <div className="mt-2 min-w-0 text-left">
+        <span
+          className={`line-clamp-1 text-xs font-medium text-ink ${
+            todo.completed ? "line-through" : ""
+          }`}
         >
-          <div className="flex flex-col items-start gap-2">
-            <span
-              className={`text-xs font-normal normal-case text-text line-clamp-1 ${
-                todo.completed ? "line-through" : ""
-              }`}
-            >
-              {todo.title}
-            </span>
-            {todo.due_date ? (
-              <span
-                className={`shrink-0 rounded-full text-xs font-medium text-text/80 normal-case ${
-                  todo.completed ? "line-through" : ""
-                }`}
-              >
-                Due {todo.due_date}
-              </span>
-            ) : null}
-          </div>
-          {todo.content ? (
-            <p
-              className={`mt-1 line-clamp-5 text-xs text-text/70 whitespace-pre-line normal-case ${
-                todo.completed ? "line-through" : ""
-              }`}
-            >
-              {todo.content}
-            </p>
-          ) : null}
-        </button>
+          {todo.title}
+        </span>
+        {todo.due_date ? (
+          <span
+            className={`mt-1 block text-xs text-muted ${
+              todo.completed ? "line-through" : ""
+            }`}
+          >
+            Due {todo.due_date}
+          </span>
+        ) : null}
+        {todo.content ? (
+          <p
+            className={`mt-1 line-clamp-4 whitespace-pre-line text-xs text-muted ${
+              todo.completed ? "line-through" : ""
+            }`}
+          >
+            {todo.content}
+          </p>
+        ) : null}
       </div>
     </div>
   );
@@ -260,19 +259,10 @@ function SortableTodoCard({
 
 function OverlayCard({ todo }: { todo: TodoRow }) {
   return (
-    <div className="w-[260px] rounded-xl border border-primary/30 bg-secondary p-3 shadow-lg">
-      <div className="truncate text-sm font-medium normal-case text-text">
-        {todo.title}
-      </div>
+    <div className="w-[260px] rounded-xl border border-mint/30 bg-surface p-3 shadow-lg">
+      <div className="truncate text-sm font-medium text-ink">{todo.title}</div>
       {todo.due_date ? (
-        <div className="mt-1 text-xs text-text/80 normal-case">
-          due {todo.due_date}
-        </div>
-      ) : null}
-      {todo.content ? (
-        <div className="mt-2 line-clamp-2 whitespace-pre-line text-xs text-text/70 normal-case">
-          {todo.content}
-        </div>
+        <div className="mt-1 text-xs text-muted">due {todo.due_date}</div>
       ) : null}
     </div>
   );
@@ -293,31 +283,32 @@ function Modal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <button
-        className="absolute inset-0 bg-background/70 backdrop-blur-sm"
+        className="absolute inset-0 bg-ink/30 backdrop-blur-sm"
         onClick={onClose}
         aria-label="Close"
       />
-      <div className="relative z-10 flex max-h-[90vh] w-full max-w-[min(92vw,28rem)] flex-col rounded-2xl border border-primary/30 bg-secondary shadow-xl">
-        <div className="flex shrink-0 items-center justify-between border-b border-primary/20 px-4 py-3">
-          <div className="truncate font-semibold text-text">{title}</div>
+      <div className="relative z-10 flex max-h-[90vh] w-full max-w-[min(92vw,28rem)] flex-col rounded-2xl border border-line bg-surface shadow-xl">
+        <div className="flex shrink-0 items-center justify-between border-b border-line px-4 py-3">
+          <div className="truncate font-semibold text-ink">{title}</div>
           <button
             onClick={onClose}
-            className="shrink-0 rounded-lg border border-primary/40 px-2 py-1 text-sm text-text/80 hover:bg-primary/20 hover:text-text"
+            className="rounded-lg border border-line px-2 py-1 text-sm text-muted hover:bg-paper"
             type="button"
           >
             Close
           </button>
         </div>
-        <div className="min-h-0 min-w-0 overflow-y-auto overflow-x-hidden p-4">
-          {children}
-        </div>
+        <div className="min-h-0 overflow-y-auto p-4">{children}</div>
       </div>
     </div>
   );
 }
 
 export default function WeekTodoCalendarPage() {
-  const [userId, setUserId] = useState<string | null>(null);
+  const { userId, loading: authLoading } = useRequireAuth();
+  const { appearance } = useAppearance();
+  const mobileStacked = appearance.mobile;
+  const desktopSideBySide = appearance.desktop;
   const [showCompleted, setShowCompleted] = useState(false);
 
   const [weekAnchor, setWeekAnchor] = useState<Date>(() =>
@@ -325,9 +316,10 @@ export default function WeekTodoCalendarPage() {
   );
 
   const weekStart = useMemo(() => startOfWeekSunday(weekAnchor), [weekAnchor]);
-  const weekDays = useMemo(() => {
-    return Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
-  }, [weekStart]);
+  const weekDays = useMemo(
+    () => Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)),
+    [weekStart]
+  );
 
   const rangeStartISO = useMemo(() => toISODate(weekStart), [weekStart]);
   const rangeEndISOExclusive = useMemo(
@@ -336,10 +328,10 @@ export default function WeekTodoCalendarPage() {
   );
 
   const [todos, setTodos] = useState<TodoRow[]>([]);
+  const [backlog, setBacklog] = useState<TodoRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [errMsg, setErrMsg] = useState<string | null>(null);
 
-  // Modal state (create/edit)
   const [modalOpen, setModalOpen] = useState(false);
   const [modalDayISO, setModalDayISO] = useState<string>(rangeStartISO);
   const [editing, setEditing] = useState<TodoRow | null>(null);
@@ -347,22 +339,22 @@ export default function WeekTodoCalendarPage() {
     title: "",
     content: "",
     due_date: "",
+    undated: false,
   });
   const [saving, setSaving] = useState(false);
-
-  // DnD overlay
   const [activeTodo, setActiveTodo] = useState<TodoRow | null>(null);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } })
   );
 
+  const allTodos = useMemo(() => [...todos, ...backlog], [todos, backlog]);
+
   const todosByDay = useMemo(() => {
     const map = new Map<string, TodoRow[]>();
     for (const day of weekDays) map.set(toISODate(day), []);
     for (const t of todos) {
-      if (!map.has(t.task_date)) continue;
-      // Filter out completed tasks unless showCompleted is true
+      if (!t.task_date || !map.has(t.task_date)) continue;
       if (!showCompleted && t.completed) continue;
       map.get(t.task_date)!.push(t);
     }
@@ -370,66 +362,76 @@ export default function WeekTodoCalendarPage() {
     return map;
   }, [todos, weekDays, showCompleted]);
 
-  // Get current user on mount
-  useEffect(() => {
-    async function getCurrentUser() {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (user) {
-        setUserId(user.id);
-      }
-    }
-    getCurrentUser();
-  }, [supabase]);
+  const visibleBacklog = useMemo(
+    () =>
+      sortByPriority(
+        backlog.filter((t) => showCompleted || !t.completed)
+      ),
+    [backlog, showCompleted]
+  );
 
-  async function loadWeek() {
+  async function loadData() {
     if (!userId) return;
-
     setLoading(true);
     setErrMsg(null);
     try {
-      const { data, error } = await supabase
-        .from("todos")
-        .select(
-          "id,created_at,task_date,priority,due_date,title,content,user_id,completed"
-        )
-        .eq("user_id", userId)
-        .gte("task_date", rangeStartISO)
-        .lt("task_date", rangeEndISOExclusive)
-        .order("task_date", { ascending: true })
-        .order("priority", { ascending: true });
+      const [weekRes, backlogRes] = await Promise.all([
+        supabase
+          .from("todos")
+          .select(
+            "id,created_at,task_date,priority,due_date,title,content,user_id,completed"
+          )
+          .eq("user_id", userId)
+          .gte("task_date", rangeStartISO)
+          .lt("task_date", rangeEndISOExclusive)
+          .order("task_date", { ascending: true })
+          .order("priority", { ascending: true }),
+        supabase
+          .from("todos")
+          .select(
+            "id,created_at,task_date,priority,due_date,title,content,user_id,completed"
+          )
+          .eq("user_id", userId)
+          .is("task_date", null)
+          .order("priority", { ascending: true }),
+      ]);
 
-      if (error) throw error;
-      setTodos((data ?? []) as TodoRow[]);
+      if (weekRes.error) throw weekRes.error;
+      if (backlogRes.error) throw backlogRes.error;
+      setTodos((weekRes.data ?? []) as TodoRow[]);
+      setBacklog((backlogRes.data ?? []) as TodoRow[]);
     } catch (e: any) {
-      setErrMsg(e?.message ?? "Failed to load week.");
+      setErrMsg(e?.message ?? "Failed to load todos.");
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    if (userId) {
-      loadWeek();
-    }
+    if (userId) loadData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rangeStartISO, rangeEndISOExclusive, userId]);
 
-  function openCreate(dayISO: string) {
+  function openCreate(dayISO: string | null) {
     setEditing(null);
-    setModalDayISO(dayISO);
-    setDraft({ title: "", content: "", due_date: "" });
+    setModalDayISO(dayISO ?? rangeStartISO);
+    setDraft({
+      title: "",
+      content: "",
+      due_date: "",
+      undated: dayISO === null,
+    });
     setModalOpen(true);
   }
 
   function openEdit(todo: TodoRow) {
     setEditing(todo);
-    setModalDayISO(todo.task_date);
+    setModalDayISO(todo.task_date ?? rangeStartISO);
     setDraft({
       title: todo.title,
       content: todo.content ?? "",
       due_date: todo.due_date ?? "",
+      undated: todo.task_date === null,
     });
     setModalOpen(true);
   }
@@ -440,18 +442,64 @@ export default function WeekTodoCalendarPage() {
         .from("todos")
         .update({ completed: !todo.completed })
         .eq("id", todo.id);
-
       if (error) throw error;
-
-      // Optimistic update
-      setTodos((prev) =>
+      const updater = (prev: TodoRow[]) =>
         prev.map((t) =>
           t.id === todo.id ? { ...t, completed: !t.completed } : t
-        )
-      );
+        );
+      if (todo.task_date === null) setBacklog(updater);
+      else setTodos(updater);
     } catch (e: any) {
       setErrMsg(e?.message ?? "Failed to toggle completion.");
-      await loadWeek();
+      await loadData();
+    }
+  }
+
+  async function persistDayPriorities(
+    dayISO: string | null,
+    dayTodos: TodoRow[]
+  ) {
+    for (const t of dayTodos) {
+      const { error } = await supabase
+        .from("todos")
+        .update({ priority: t.priority, task_date: dayISO })
+        .eq("id", t.id);
+      if (error) throw error;
+    }
+  }
+
+  async function clearDate(todo: TodoRow) {
+    if (!todo.task_date) return;
+    const fromDay = todo.task_date;
+    const remaining = withReprioritized(
+      (todosByDay.get(fromDay) ?? []).filter((t) => t.id !== todo.id)
+    );
+    const moved: TodoRow = {
+      ...todo,
+      task_date: null,
+      priority: visibleBacklog.length + 1,
+    };
+
+    setTodos((prev) =>
+      prev
+        .filter((t) => t.id !== todo.id)
+        .map((t) => {
+          if (t.task_date !== fromDay) return t;
+          const found = remaining.find((x) => x.id === t.id);
+          return found ? { ...t, priority: found.priority } : t;
+        })
+    );
+    setBacklog((prev) => [...prev, moved]);
+
+    try {
+      await persistDayPriorities(fromDay, remaining);
+      await supabase
+        .from("todos")
+        .update({ task_date: null, priority: moved.priority })
+        .eq("id", todo.id);
+    } catch (e: any) {
+      setErrMsg(e?.message ?? "Failed to move to backlog.");
+      await loadData();
     }
   }
 
@@ -460,96 +508,49 @@ export default function WeekTodoCalendarPage() {
       setErrMsg("Please log in to create tasks.");
       return;
     }
-
     const title = draft.title.trim();
     if (!title) return;
 
-    // basic date sanity (supports up to year 2100)
-    const day = fromISODate(modalDayISO);
-    if (day.getFullYear() > 2100) return;
+    const taskDate = draft.undated ? null : modalDayISO;
+    if (taskDate) {
+      const day = fromISODate(taskDate);
+      if (day.getFullYear() > 2100) return;
+    }
 
     setSaving(true);
     setErrMsg(null);
 
     try {
       if (editing) {
-        const dayChanged = modalDayISO !== editing.task_date;
-        const targetDayTodos = todosByDay.get(modalDayISO) ?? [];
-        const nextPriority = dayChanged
-          ? targetDayTodos.length + 1
-          : editing.priority;
-
         const patch = {
           title,
           content: draft.content.trim() ? draft.content.trim() : null,
           due_date: draft.due_date ? draft.due_date : null,
-          task_date: modalDayISO,
-          priority: nextPriority,
+          task_date: taskDate,
+          priority: editing.priority,
         };
 
-        // optimistic: update todo and reprioritize old day if moved
-        setTodos((prev) => {
-          let next = prev.map((t) =>
-            t.id === editing.id ? { ...t, ...patch } : t
-          );
-          if (dayChanged) {
-            const oldDay = editing.task_date;
-            const oldDayRemaining = next
-              .filter((t) => t.task_date === oldDay && t.id !== editing.id)
-              .sort((a, b) => a.priority - b.priority);
-            const reprioritizedOld = withReprioritized(oldDayRemaining);
-            const newDayList = next
-              .filter((t) => t.task_date === modalDayISO)
-              .sort((a, b) => a.priority - b.priority);
-            const reprioritizedNew = withReprioritized(newDayList);
-            next = next.map((t) => {
-              if (t.task_date === oldDay && t.id !== editing.id) {
-                const found = reprioritizedOld.find((x) => x.id === t.id);
-                return found ? { ...t, priority: found.priority } : t;
-              }
-              if (t.task_date === modalDayISO) {
-                const found = reprioritizedNew.find((x) => x.id === t.id);
-                return found ? { ...t, priority: found.priority } : t;
-              }
-              return t;
-            });
-          }
-          return next;
-        });
+        if (taskDate === null) {
+          patch.priority = backlog.length + (editing.task_date === null ? 0 : 1);
+        } else if (editing.task_date !== taskDate) {
+          const target = todosByDay.get(taskDate) ?? [];
+          patch.priority = target.length + 1;
+        }
 
         const { error } = await supabase
           .from("todos")
           .update(patch)
           .eq("id", editing.id);
-
         if (error) throw error;
-
-        if (dayChanged) {
-          const oldDay = editing.task_date;
-          const oldDayRemaining = (todosByDay.get(oldDay) ?? []).filter(
-            (t) => t.id !== editing.id
-          );
-          await persistDayPriorities(
-            oldDay,
-            withReprioritized(oldDayRemaining)
-          );
-          const newDayList = [
-            ...(todosByDay.get(modalDayISO) ?? []).filter(
-              (t) => t.id !== editing.id
-            ),
-            { ...editing, ...patch },
-          ].sort((a, b) => a.priority - b.priority);
-          await persistDayPriorities(
-            modalDayISO,
-            withReprioritized(newDayList)
-          );
-        }
+        await loadData();
       } else {
-        const existing = todosByDay.get(modalDayISO) ?? [];
-        const nextPriority = existing.length + 1;
+        const nextPriority =
+          taskDate === null
+            ? backlog.length + 1
+            : (todosByDay.get(taskDate) ?? []).length + 1;
 
         const insertRow = {
-          task_date: modalDayISO,
+          task_date: taskDate,
           priority: nextPriority,
           due_date: draft.due_date ? draft.due_date : null,
           title,
@@ -567,60 +568,34 @@ export default function WeekTodoCalendarPage() {
           .single();
 
         if (error) throw error;
-
-        if (data) setTodos((prev) => [...prev, data as TodoRow]);
+        if (data) {
+          const row = data as TodoRow;
+          if (row.task_date === null) setBacklog((prev) => [...prev, row]);
+          else setTodos((prev) => [...prev, row]);
+        }
       }
 
       setModalOpen(false);
     } catch (e: any) {
       setErrMsg(e?.message ?? "Save failed.");
-      // reload to be safe if optimistic update drifted
-      await loadWeek();
+      await loadData();
     } finally {
       setSaving(false);
     }
   }
 
   async function deleteTodo(todo: TodoRow) {
-    // optimistic remove + reprioritize day
-    const dayISO = todo.task_date;
-    const remaining = (todosByDay.get(dayISO) ?? []).filter(
-      (t) => t.id !== todo.id
-    );
-    const reprioritized = withReprioritized(remaining);
-
-    setTodos((prev) => {
-      const kept = prev.filter((t) => t.id !== todo.id);
-      return kept.map((t) => {
-        if (t.task_date !== dayISO) return t;
-        const found = reprioritized.find((x) => x.id === t.id);
-        return found ? { ...t, priority: found.priority } : t;
-      });
-    });
-
     try {
-      const { error: delErr } = await supabase
-        .from("todos")
-        .delete()
-        .eq("id", todo.id);
-      if (delErr) throw delErr;
-
-      // write new priorities for the day (only the ones that changed)
-      const updates = reprioritized.map((t) => ({
-        id: t.id,
-        priority: t.priority,
-      }));
-      // Do a few updates individually (simple + reliable).
-      for (const u of updates) {
-        const { error } = await supabase
-          .from("todos")
-          .update({ priority: u.priority })
-          .eq("id", u.id);
-        if (error) throw error;
+      const { error } = await supabase.from("todos").delete().eq("id", todo.id);
+      if (error) throw error;
+      if (todo.task_date === null) {
+        setBacklog((prev) => prev.filter((t) => t.id !== todo.id));
+      } else {
+        setTodos((prev) => prev.filter((t) => t.id !== todo.id));
       }
     } catch (e: any) {
       setErrMsg(e?.message ?? "Delete failed.");
-      await loadWeek();
+      await loadData();
     }
   }
 
@@ -628,52 +603,57 @@ export default function WeekTodoCalendarPage() {
     const s = String(id);
     if (!s.startsWith("todo:")) return null;
     const tid = Number(s.replace("todo:", ""));
-    return todos.find((t) => t.id === tid) ?? null;
+    return allTodos.find((t) => t.id === tid) ?? null;
   }
 
-  function findContainerDayISO(overId: string | number): string | null {
+  function findContainerKey(overId: string | number): string | null {
     const s = String(overId);
     if (isDayId(s)) return isoFromDayId(s);
     if (s.startsWith("todo:")) {
       const t = findTodoByDnDId(s);
-      return t?.task_date ?? null;
+      if (!t) return null;
+      return t.task_date ?? "backlog";
     }
     return null;
   }
 
-  async function persistDayPriorities(dayISO: string, dayTodos: TodoRow[]) {
-    // Persist priorities (1..n). Updates only if needed.
-    for (const t of dayTodos) {
-      const { error } = await supabase
-        .from("todos")
-        .update({ priority: t.priority, task_date: t.task_date })
-        .eq("id", t.id);
-      if (error) throw error;
-    }
+  function listForKey(key: string): TodoRow[] {
+    if (key === "backlog") return sortByPriority(visibleBacklog);
+    return sortByPriority(todosByDay.get(key) ?? []);
+  }
+
+  function applyPriorities(
+    prev: TodoRow[],
+    dayKey: string | null,
+    ordered: TodoRow[]
+  ) {
+    const priorityMap = new Map(ordered.map((t) => [t.id, t.priority]));
+    return prev.map((t) => {
+      const matches =
+        dayKey === null ? t.task_date === null : t.task_date === dayKey;
+      if (!matches || !priorityMap.has(t.id)) return t;
+      return { ...t, priority: priorityMap.get(t.id)! };
+    });
   }
 
   async function handleDragEnd(evt: DragEndEvent) {
     const { active, over } = evt;
     setActiveTodo(null);
-
     if (!over) return;
 
-    const activeTodo = findTodoByDnDId(active.id);
-    if (!activeTodo) return;
+    const dragged = findTodoByDnDId(active.id);
+    if (!dragged) return;
 
-    const fromDay = activeTodo.task_date;
-    const toDay = findContainerDayISO(over.id);
-    if (!toDay) return;
+    const fromKey = dragged.task_date ?? "backlog";
+    const toKey = findContainerKey(over.id);
+    if (!toKey) return;
 
-    // Current sorted lists
-    const fromList = sortByPriority(todosByDay.get(fromDay) ?? []);
-    const toList = sortByPriority(todosByDay.get(toDay) ?? []);
+    const fromList = listForKey(fromKey);
+    const toList = listForKey(toKey);
 
-    // within same day reorder
-    if (isSameISO(fromDay, toDay)) {
-      const oldIndex = fromList.findIndex((t) => t.id === activeTodo.id);
+    if (fromKey === toKey) {
+      const oldIndex = fromList.findIndex((t) => t.id === dragged.id);
       if (oldIndex === -1) return;
-
       let newIndex = oldIndex;
       const overStr = String(over.id);
       if (overStr.startsWith("todo:")) {
@@ -683,151 +663,149 @@ export default function WeekTodoCalendarPage() {
           if (newIndex === -1) newIndex = oldIndex;
         }
       } else {
-        // dropped on the day container itself -> move to end
         newIndex = fromList.length - 1;
       }
-
       if (oldIndex === newIndex) return;
-
-      const moved = arrayMove(fromList, oldIndex, newIndex);
-      const reprioritized = withReprioritized(moved);
-
-      // optimistic apply
-      setTodos((prev) =>
-        prev.map((t) => {
-          if (t.task_date !== fromDay) return t;
-          const found = reprioritized.find((x) => x.id === t.id);
-          return found ? { ...t, priority: found.priority } : t;
-        })
-      );
-
+      const moved = withReprioritized(arrayMove(fromList, oldIndex, newIndex));
+      const dayISO = fromKey === "backlog" ? null : fromKey;
+      if (fromKey === "backlog") {
+        setBacklog((prev) => applyPriorities(prev, null, moved));
+      } else {
+        setTodos((prev) => applyPriorities(prev, fromKey, moved));
+      }
       try {
-        await persistDayPriorities(fromDay, reprioritized);
+        await persistDayPriorities(dayISO, moved);
       } catch (e: any) {
         setErrMsg(e?.message ?? "Reorder failed.");
-        await loadWeek();
+        await loadData();
       }
       return;
     }
 
-    // moving between days
-    const fromIndex = fromList.findIndex((t) => t.id === activeTodo.id);
-    if (fromIndex === -1) return;
-
     const overStr = String(over.id);
-    let insertIndex = toList.length; // default end
+    let insertIndex = toList.length;
     if (overStr.startsWith("todo:")) {
       const overTodo = findTodoByDnDId(overStr);
-      if (overTodo && overTodo.task_date === toDay) {
+      if (overTodo) {
         const idx = toList.findIndex((t) => t.id === overTodo.id);
         insertIndex = idx === -1 ? toList.length : idx;
       }
     }
 
-    const movingTodo: TodoRow = { ...activeTodo, task_date: toDay };
+    const toDate = toKey === "backlog" ? null : toKey;
+    const movingTodo: TodoRow = { ...dragged, task_date: toDate };
     const newFrom = withReprioritized(
-      fromList.filter((t) => t.id !== activeTodo.id)
+      fromList.filter((t) => t.id !== dragged.id)
     );
-
-    const toWithout = toList.filter((t) => t.id !== activeTodo.id);
-    const newToRaw = [
+    const toWithout = toList.filter((t) => t.id !== dragged.id);
+    const newTo = withReprioritized([
       ...toWithout.slice(0, insertIndex),
       movingTodo,
       ...toWithout.slice(insertIndex),
-    ];
-    const newTo = withReprioritized(newToRaw).map((t) => ({
-      ...t,
-      task_date: toDay,
-    }));
+    ]).map((t) => ({ ...t, task_date: toDate }));
 
-    // optimistic apply for both days
-    setTodos(
-      (prev) =>
-        prev.map((t) => {
-          // moved item
-          if (t.id === activeTodo.id) {
-            const moved = newTo.find((x) => x.id === t.id);
-            return moved ? { ...t, ...moved } : { ...t, task_date: toDay };
-          }
+    // Optimistic UI — update both containers before persisting
+    if (fromKey === "backlog") {
+      setBacklog((prev) =>
+        applyPriorities(
+          prev.filter((t) => t.id !== dragged.id),
+          null,
+          newFrom
+        )
+      );
+    } else {
+      setTodos((prev) =>
+        applyPriorities(
+          prev.filter((t) => t.id !== dragged.id),
+          fromKey,
+          newFrom
+        )
+      );
+    }
 
-          if (t.task_date === fromDay) {
-            const found = newFrom.find((x) => x.id === t.id);
-            return found ? { ...t, priority: found.priority } : t;
-          }
-
-          if (t.task_date === toDay) {
-            const found = newTo.find((x) => x.id === t.id);
-            return found ? { ...t, priority: found.priority } : t;
-          }
-
-          return t;
-        })
-      // if moved item wasn’t in prev for some reason, ensure it exists
-    );
+    if (toKey === "backlog") {
+      setBacklog((prev) => {
+        const without = prev.filter((t) => t.id !== dragged.id);
+        const prioritized = applyPriorities(without, null, newTo);
+        const existingIds = new Set(prioritized.map((t) => t.id));
+        const additions = newTo.filter((t) => !existingIds.has(t.id));
+        return [...prioritized, ...additions];
+      });
+    } else {
+      setTodos((prev) => {
+        const without = prev.filter((t) => t.id !== dragged.id);
+        const prioritized = applyPriorities(without, toKey, newTo);
+        const existingIds = new Set(prioritized.map((t) => t.id));
+        const additions = newTo.filter((t) => !existingIds.has(t.id));
+        return [...prioritized, ...additions];
+      });
+    }
 
     try {
-      // Persist: update task_date + priority for all todos in both days
-      await persistDayPriorities(fromDay, newFrom);
-      await persistDayPriorities(toDay, newTo);
+      await persistDayPriorities(
+        fromKey === "backlog" ? null : fromKey,
+        newFrom
+      );
+      await persistDayPriorities(toDate, newTo);
     } catch (e: any) {
       setErrMsg(e?.message ?? "Move failed.");
-      await loadWeek();
+      await loadData();
     }
   }
 
-  function handleDragStart(activeId: string | number) {
-    const t = findTodoByDnDId(activeId);
-    if (t) setActiveTodo(t);
-  }
-
-  function gotoPrevWeek() {
-    const prev = clampYear2100(addDays(weekStart, -7));
-    setWeekAnchor(startOfWeekSunday(prev));
-  }
-
-  function gotoNextWeek() {
-    const next = clampYear2100(addDays(weekStart, 7));
-    setWeekAnchor(startOfWeekSunday(next));
-  }
+  const [todayISO, setTodayISO] = useState("");
+  useEffect(() => {
+    setTodayISO(toISODate(new Date()));
+  }, []);
 
   const weekLabel = useMemo(() => {
     const end = addDays(weekStart, 6);
     return `${prettyMD(weekStart)} – ${prettyMD(end)}, ${end.getFullYear()}`;
   }, [weekStart]);
 
-  const [todayISO, setTodayISO] = useState<string>("");
-
-  useEffect(() => {
-    const now = new Date();
-    setTodayISO(toISODate(now)); // user’s computer time
-  }, []);
+  if (authLoading) {
+    return (
+      <div className="dashboard-shell flex min-h-screen items-center justify-center text-muted">
+        …
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-background text-text">
+    <div className="dashboard-shell pb-24 text-ink md:pb-10">
       <Head>
-        <title>Todo Calendar</title>
+        <title>Todo · Ethan&apos;s Tools</title>
       </Head>
-      <NavBar />
-      <div className="flex flex-col mx-auto items-center px-4 py-6">
+      <AppNav />
+      <div className="mx-auto flex w-full max-w-none flex-col px-5 py-6 sm:px-6 lg:px-8">
         {errMsg ? (
-          <div className="mb-4 w-[95dvw] rounded-xl border border-primary/40 bg-primary/10 px-4 py-3 text-sm text-text">
+          <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
             {errMsg}
           </div>
         ) : null}
 
-        {/* Box: header left, nav right, then grid */}
-        <div className="w-[95dvw] rounded-2xl border border-primary/20 bg-secondary/50 p-3 sm:p-4">
-          {/* Header: Weekly Tasks + date on left, < Today > on right */}
+        <DndContext
+          sensors={sensors}
+          collisionDetection={pointerWithin}
+          onDragStart={(e) => {
+            const t = findTodoByDnDId(e.active.id);
+            if (t) setActiveTodo(t);
+          }}
+          onDragEnd={handleDragEnd}
+        >
           <div className="mb-4 flex flex-row items-center justify-between gap-4">
-            <div className="min-w-0 flex flex-col">
-              <h1 className="text-xl font-semibold text-text">Weekly Tasks</h1>
-              <p className="mt-1 text-sm text-text/75">{weekLabel}</p>
+            <div>
+              <h1 className="font-display text-xl font-semibold">Weekly Tasks</h1>
+              <p className="mt-1 text-sm text-muted">{weekLabel}</p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
-              <PageColorPicker />
               <button
-                onClick={gotoPrevWeek}
-                className="rounded-xl border border-primary/40 px-3 py-2 text-sm text-text hover:bg-primary/20 transition"
+                onClick={() =>
+                  setWeekAnchor(
+                    startOfWeekSunday(clampYear2100(addDays(weekStart, -7)))
+                  )
+                }
+                className="rounded-xl border border-line bg-surface px-3 py-2 text-sm hover:bg-paper"
                 type="button"
               >
                 ←
@@ -836,14 +814,18 @@ export default function WeekTodoCalendarPage() {
                 onClick={() =>
                   setWeekAnchor(startOfWeekSunday(clampYear2100(new Date())))
                 }
-                className="rounded-xl border border-primary/40 px-3 py-2 text-sm text-text hover:bg-primary/20 transition"
+                className="rounded-xl border border-line bg-surface px-3 py-2 text-sm hover:bg-paper"
                 type="button"
               >
                 Today
               </button>
               <button
-                onClick={gotoNextWeek}
-                className="rounded-xl border border-primary/40 px-3 py-2 text-sm text-text hover:bg-primary/20 transition"
+                onClick={() =>
+                  setWeekAnchor(
+                    startOfWeekSunday(clampYear2100(addDays(weekStart, 7)))
+                  )
+                }
+                className="rounded-xl border border-line bg-surface px-3 py-2 text-sm hover:bg-paper"
                 type="button"
               >
                 →
@@ -851,16 +833,24 @@ export default function WeekTodoCalendarPage() {
             </div>
           </div>
 
-          {/* Grid */}
-          <DndContext
-            sensors={sensors}
-            collisionDetection={pointerWithin}
-            onDragStart={(e: { active: { id: string | number } }) =>
-              handleDragStart(e.active.id)
-            }
-            onDragEnd={handleDragEnd}
+          <div
+            className={[
+              mobileStacked ? "" : "overflow-x-auto pb-1",
+              desktopSideBySide ? "md:overflow-visible md:pb-0" : "md:overflow-x-auto md:pb-1",
+            ]
+              .filter(Boolean)
+              .join(" ")}
           >
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-7">
+            <div
+              className={[
+                mobileStacked
+                  ? "flex flex-col gap-3"
+                  : "grid min-w-[980px] grid-cols-7 gap-2.5",
+                desktopSideBySide
+                  ? "md:grid md:min-w-0 md:grid-cols-7 md:gap-2.5"
+                  : "md:grid md:min-w-[980px] md:grid-cols-7 md:gap-2.5",
+              ].join(" ")}
+            >
               {weekDays.map((day) => {
                 const dayISO = toISODate(day);
                 const dayTodos = todosByDay.get(dayISO) ?? [];
@@ -869,27 +859,28 @@ export default function WeekTodoCalendarPage() {
                 return (
                   <div
                     key={dayISO}
-                    className="flex min-h-[220px] flex-col rounded-2xl border border-primary/20 bg-secondary/40"
+                    className={[
+                      "flex flex-col rounded-2xl border border-line bg-surface",
+                      mobileStacked ? "min-h-[140px]" : "min-h-[240px]",
+                      "md:min-h-[240px]",
+                    ].join(" ")}
                   >
-                    {/* Day header */}
                     <div
                       className={`${
-                        todayISO && dayISO === todayISO ? "bg-primary/40" : ""
-                      }  flex items-center justify-between rounded-t-2xl gap-2 border-b border-primary/20 px-3 py-2`}
+                        todayISO && dayISO === todayISO ? "bg-mint-soft" : ""
+                      } flex items-center justify-between gap-2 rounded-t-2xl border-b border-line px-3 py-2`}
                     >
                       <div className="min-w-0">
-                        <div className="text-xs tracking-wide text-text/70 normal-case">
+                        <div className="text-xs tracking-wide text-muted">
                           {prettyDow(day)}
                         </div>
-                        <div className="truncate font-medium text-text">
-                          {prettyMD(day)}
-                        </div>
-                        <div className="text-xs text-text/60">{dayISO}</div>
+                        <div className="truncate font-medium">{prettyMD(day)}</div>
                       </div>
                     </div>
-
-                    {/* Day body */}
-                    <div className="flex-1 p-3">
+                    <div
+                      className="flex flex-1 cursor-pointer flex-col rounded-b-2xl p-2.5 transition hover:bg-mint/5"
+                      onClick={() => openCreate(dayISO)}
+                    >
                       <SortableContext
                         items={[
                           containerId,
@@ -900,18 +891,22 @@ export default function WeekTodoCalendarPage() {
                         <DroppableDayBody
                           id={containerId}
                           className={[
-                            "flex flex-col gap-2",
-                            "min-h-[160px] rounded-xl",
-                            "p-2 -m-2",
-                            "transition",
+                            "flex flex-1 flex-col gap-2 rounded-xl",
+                            mobileStacked ? "min-h-[72px]" : "min-h-[180px]",
+                            "md:min-h-[180px]",
                           ].join(" ")}
                         >
                           {dayTodos.length === 0 ? (
-                            <div className="rounded-xl border border-dashed border-primary/30 px-3 py-6 text-center text-sm text-text/60">
-                              Drop tasks here
+                            <div
+                              className={[
+                                "flex items-center justify-center rounded-xl border border-dashed border-line px-3 text-center text-sm text-muted",
+                                mobileStacked ? "w-full py-5" : "flex-1 py-6",
+                                "md:flex-1 md:py-6",
+                              ].join(" ")}
+                            >
+                              Click or drop tasks
                             </div>
                           ) : null}
-
                           {dayTodos.map((t) => (
                             <SortableTodoCard
                               key={t.id}
@@ -919,16 +914,9 @@ export default function WeekTodoCalendarPage() {
                               onEdit={openEdit}
                               onDelete={deleteTodo}
                               onComplete={toggleComplete}
+                              onClearDate={clearDate}
                             />
                           ))}
-
-                          <button
-                            onClick={() => openCreate(dayISO)}
-                            className="shrink-0 rounded-xl border border-dashed border-primary/40 px-2 py-2 text-sm text-text/70 transition hover:bg-primary/10 hover:text-text"
-                            type="button"
-                          >
-                            + Add
-                          </button>
                         </DroppableDayBody>
                       </SortableContext>
                     </div>
@@ -936,109 +924,149 @@ export default function WeekTodoCalendarPage() {
                 );
               })}
             </div>
+          </div>
 
-            <DragOverlay>
-              {activeTodo ? <OverlayCard todo={activeTodo} /> : null}
-            </DragOverlay>
-          </DndContext>
-
-          <div className="mt-4 flex items-center justify-between gap-3 text-sm text-text/75">
+          <div className="mt-4 flex items-center justify-between gap-3 text-sm text-muted">
             <div>
               {loading
                 ? "Loading…"
-                : `${
-                    todos.filter((t) => !t.completed || showCompleted).length
-                  } task(s) this week`}
+                : `${todos.filter((t) => !t.completed || showCompleted).length} this week · ${visibleBacklog.length} backlog`}
             </div>
             <div className="flex items-center gap-2">
               <button
                 onClick={() => setShowCompleted(!showCompleted)}
-                className="rounded-xl border border-primary/40 px-3 py-2 text-sm text-text hover:bg-primary/20 transition"
+                className="rounded-xl border border-line bg-surface px-3 py-2 text-sm hover:bg-paper"
                 type="button"
               >
                 {showCompleted ? "Hide" : "Show"} Completed
               </button>
               <button
-                onClick={loadWeek}
-                className="rounded-xl border border-primary/40 px-3 py-2 text-sm text-text hover:bg-primary/20 transition"
+                onClick={loadData}
+                className="rounded-xl border border-line bg-surface px-3 py-2 text-sm hover:bg-paper"
                 type="button"
               >
                 Refresh
               </button>
             </div>
           </div>
-        </div>
+
+          <div className="mt-5 rounded-2xl border border-line bg-surface p-4 shadow-sm">
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="font-display text-sm font-semibold">Backlog</h2>
+              <button
+                type="button"
+                onClick={() => openCreate(null)}
+                className="rounded-lg border border-dashed border-mint/50 px-2 py-1 text-xs text-mint hover:bg-mint-soft"
+              >
+                + Add
+              </button>
+            </div>
+            <SortableContext
+              items={[BACKLOG_ID, ...visibleBacklog.map((t) => `todo:${t.id}`)]}
+              strategy={verticalListSortingStrategy}
+            >
+              <DroppableDayBody
+                id={BACKLOG_ID}
+                onClick={() => openCreate(null)}
+                className="flex min-h-[100px] cursor-pointer flex-col gap-2 rounded-xl transition hover:bg-mint/5 sm:grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
+              >
+                {visibleBacklog.length === 0 ? (
+                  <div className="rounded-xl border border-dashed border-line px-3 py-8 text-center text-xs text-muted sm:col-span-full">
+                    Click or drop tasks
+                  </div>
+                ) : null}
+                {visibleBacklog.map((t) => (
+                  <SortableTodoCard
+                    key={t.id}
+                    todo={t}
+                    onEdit={openEdit}
+                    onDelete={deleteTodo}
+                    onComplete={toggleComplete}
+                  />
+                ))}
+              </DroppableDayBody>
+            </SortableContext>
+          </div>
+
+          <DragOverlay>
+            {activeTodo ? <OverlayCard todo={activeTodo} /> : null}
+          </DragOverlay>
+        </DndContext>
       </div>
 
-      {/* Create/Edit modal */}
       <Modal
         open={modalOpen}
         title={editing ? "Edit task" : "New task"}
         onClose={() => setModalOpen(false)}
       >
-        <div className="space-y-4 min-w-0">
-          <div className="space-y-2 min-w-0">
-            <label className="block text-sm font-medium text-text">
-              Task date*
-            </label>
+        <div className="space-y-4">
+          <label className="flex items-center gap-2 text-sm text-ink">
             <input
-              type="date"
-              value={modalDayISO}
-              onChange={(e) => setModalDayISO(e.target.value)}
-              className="w-[100dvw] min-w-0 max-w-full rounded-xl border border-primary/30 bg-background px-3 py-2 text-text outline-none focus:ring-2 focus:ring-primary/40"
-              min="1900-01-01"
-              max="2100-12-31"
+              type="checkbox"
+              checked={draft.undated}
+              onChange={(e) =>
+                setDraft((p) => ({ ...p, undated: e.target.checked }))
+              }
             />
-          </div>
+            Backlog
+          </label>
 
-          <div className="space-y-2 min-w-0">
-            <label className="block text-sm font-medium text-text">
-              Title*
-            </label>
+          {!draft.undated ? (
+            <div className="space-y-2">
+              <label className="block text-sm font-medium">Task date*</label>
+              <input
+                type="date"
+                value={modalDayISO}
+                onChange={(e) => setModalDayISO(e.target.value)}
+                className="w-full rounded-xl border border-line bg-paper px-3 py-2 outline-none focus:ring-2 focus:ring-mint/40"
+                min="1900-01-01"
+                max="2100-12-31"
+              />
+            </div>
+          ) : null}
+
+          <div className="space-y-2">
+            <label className="block text-sm font-medium">Title*</label>
             <input
               value={draft.title}
               onChange={(e) =>
                 setDraft((p) => ({ ...p, title: e.target.value }))
               }
-              className="w-full min-w-0 max-w-full rounded-xl border border-primary/30 bg-background px-3 py-2 text-text outline-none focus:ring-2 focus:ring-primary/40"
+              className="w-full rounded-xl border border-line bg-paper px-3 py-2 outline-none focus:ring-2 focus:ring-mint/40"
               placeholder="What needs doing?"
             />
           </div>
 
-          <div className="space-y-2 min-w-0">
-            <label className="block text-sm font-medium text-text">
-              Details
-            </label>
+          <div className="space-y-2">
+            <label className="block text-sm font-medium">Details</label>
             <textarea
               value={draft.content}
               onChange={(e) =>
                 setDraft((p) => ({ ...p, content: e.target.value }))
               }
-              className="min-h-[90px] w-full min-w-0 max-w-full rounded-xl border border-primary/30 bg-background px-3 py-2 text-text outline-none focus:ring-2 focus:ring-primary/40"
+              className="min-h-[90px] w-full rounded-xl border border-line bg-paper px-3 py-2 outline-none focus:ring-2 focus:ring-mint/40"
               placeholder="Notes…"
             />
           </div>
 
-          <div className="space-y-2 min-w-0">
-            <label className="block text-sm font-medium text-text">
-              Due date
-            </label>
+          <div className="space-y-2">
+            <label className="block text-sm font-medium">Due date</label>
             <input
               type="date"
               value={draft.due_date}
               onChange={(e) =>
                 setDraft((p) => ({ ...p, due_date: e.target.value }))
               }
-              className="w-[100dvw] min-w-0 max-w-full rounded-xl border border-primary/30 bg-background px-3 py-2 text-text outline-none focus:ring-2 focus:ring-primary/40"
+              className="w-full rounded-xl border border-line bg-paper px-3 py-2 outline-none focus:ring-2 focus:ring-mint/40"
               min="1900-01-01"
               max="2100-12-31"
             />
           </div>
 
-          <div className="flex items-center justify-end gap-2 pt-2">
+          <div className="flex justify-end gap-2 pt-2">
             <button
               onClick={() => setModalOpen(false)}
-              className="rounded-xl border border-primary/40 px-4 py-2 text-sm text-text transition hover:bg-primary/20"
+              className="rounded-xl border border-line px-4 py-2 text-sm hover:bg-paper"
               type="button"
             >
               Cancel
@@ -1046,7 +1074,7 @@ export default function WeekTodoCalendarPage() {
             <button
               onClick={saveTodo}
               disabled={saving || !draft.title.trim()}
-              className="rounded-xl bg-primary px-4 py-2 text-sm font-medium text-reverse disabled:opacity/50"
+              className="rounded-xl bg-mint px-4 py-2 text-sm font-semibold text-paper disabled:opacity-50"
               type="button"
             >
               {saving ? "Saving…" : "Save"}
@@ -1057,11 +1085,3 @@ export default function WeekTodoCalendarPage() {
     </div>
   );
 }
-
-/**
- * Notes / recommended DB constraints (optional but strongly recommended):
- * - Enforce unique priority within a day so ordering stays consistent:
- *     create unique index todos_task_date_priority_key on public.todos(task_date, priority);
- *
- * - If you enable RLS in Supabase, add policies for selecting/inserting/updating/deleting.
- */
