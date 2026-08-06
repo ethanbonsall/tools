@@ -745,8 +745,8 @@ export default function HealthPage() {
         </main>
       ) : (
         <div className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 gap-3 px-3 pb-20 pt-2 md:gap-4 md:px-5 md:pb-4">
-          {/* Left circular nav — scrolls to section boxes */}
-          <nav className="sticky top-2 z-10 flex shrink-0 flex-col items-center gap-3 self-start">
+          {/* Left circular nav — desktop only; scrolls to section boxes */}
+          <nav className="sticky top-2 z-10 hidden shrink-0 flex-col items-center gap-3 self-start md:flex">
             {TABS.map(({ id, label, icon: Icon }) => {
               const active = activeSection === id;
               return (
