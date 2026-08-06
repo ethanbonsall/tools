@@ -9,8 +9,9 @@ import {
   percentsFromGrams,
 } from "@/lib/health";
 
-const inputClass =
-  "w-full rounded-xl border border-line bg-paper px-3 py-2.5 text-sm text-ink focus:border-mint/50 focus:outline-none";
+const inputBase =
+  "rounded-xl border border-line bg-paper px-3 py-2.5 text-sm text-ink focus:border-mint/50 focus:outline-none";
+const inputClass = `w-full ${inputBase}`;
 
 export type GoalDraft = {
   key: string;
@@ -258,7 +259,7 @@ export default function SettingsPanel({
                   + Add goal
                 </button>
               </div>
-              <div className="space-y-4">
+              <div className="space-y-2">
                 {visibleGoals.map((g) => (
                   <div key={g.key} className="flex items-center gap-2">
                     <input
@@ -268,7 +269,7 @@ export default function SettingsPanel({
                       onChange={(e) =>
                         updateGoal(g.key, { target_weight: e.target.value })
                       }
-                      className={`${inputClass} w-[4.25rem] shrink-0`}
+                      className={`${inputBase} w-[4.25rem] shrink-0`}
                       placeholder="180"
                       aria-label="Target weight"
                     />
@@ -278,7 +279,7 @@ export default function SettingsPanel({
                       onChange={(e) =>
                         updateGoal(g.key, { target_date: e.target.value })
                       }
-                      className={`${inputClass} w-[8.5rem] shrink-0`}
+                      className={`${inputBase} w-[8.5rem] shrink-0`}
                       aria-label="Target date"
                     />
                     <input
@@ -286,7 +287,7 @@ export default function SettingsPanel({
                       onChange={(e) =>
                         updateGoal(g.key, { reward: e.target.value })
                       }
-                      className={`${inputClass} min-w-0 flex-1`}
+                      className={`${inputBase} min-w-0 flex-1`}
                       placeholder="Optional"
                       aria-label="Reward"
                     />
